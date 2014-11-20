@@ -1,0 +1,294 @@
+#!/usr/bin/env python
+# Copyright (c) 2013-2014 Spotify AB
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+#
+# Tool that parse the Cassandra log and summarizes statistics about repairs
+
+from optparse import OptionParser
+
+import re
+import string
+import time
+import sys
+import os.path
+
+FORMAT="%Y-%m-%d %H:%M:%S"
+
+CASSANDRA_LOG_FILE = '/var/log/cassandra/system.log'
+
+RE_SESSION  = re.compile("repair (#\w{8}-\w{4}-\w{4}-\w{4}-\w{12})")
+RE_TIME     = re.compile("\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+RE_HOSTS    = re.compile("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+RE_RANGE    = re.compile("on range \(([^\]]*),([^\]]*)\]")
+RE_KEYSPACE = re.compile(" for ([^\.]*)")
+
+# TODO: Should probably create some classes...
+
+start={}  # session-id -> start time of session
+end={}    # session-id -> end time of session
+last={}   # session-id -> last time of a log message
+session_keyspace={} # session-id -> keyspace
+range_size={} # session-id -> size of range in %
+order=[]  # Order of session-ids
+
+all_cfs={} # keyspace -> list of column families
+
+merkle_start={}    # session-id:CF -> start time of gathering merkle trees
+merkle_last={}     # session-id:CF -> last time a merkle tree was received
+merkle_end={}      # session-id:CF -> end time of gathering merkle trees
+merkle_pending={}  # session-id:CF -> set of hosts where we're awaiting merkle trees
+
+streaming_start={} # session-id:CF -> start of streaming
+streaming_last={}  # session-id:CF -> last stream to end (requires DEBUG logging)
+streaming_end={}   # session-id:CF -> end of streaming
+streams_pending={} # session-id:CF -> set of hosts with active streams
+streams_all={}     # session-id:CF -> all set of hosts that has to stream
+
+def parse_cf(line, prefix=None, suffix=None):
+    if prefix:
+        ix = line.find(prefix)
+        if ix < 0:
+            return None
+        return line[ix + len(prefix) + 1:].split(' ', 2)[0].strip()
+    if suffix:
+        ix = line.find(suffix)
+        if ix < 0:
+            return None
+        return line[:ix - 1].split(' ')[-1].strip()
+
+def calc_range_size(start, end):
+    # Figure out size of total ring
+    # We try to guess the partitioner based on the start and end - should work most of the time :)
+    total = 2**64
+    if len(str(start)) > 30 or len(str(end)) > 30:
+        # Laarge tokens means random partitioner
+        total = 2**127
+    if start<end:
+        return (end-start)*100.0/total
+    return (end-start+total)*100.0/total
+
+def parse_line(line):
+    result = RE_SESSION.search(line)
+    timeres = RE_TIME.search(line)
+    if not result or not timeres:
+        return
+
+    session_id = result.groups(0)[0]
+    tm = time.strptime(timeres.group(0), "%Y-%m-%d %H:%M:%S")
+
+    if line.find('new session') >= 0:
+        # Start of new repair session
+        start[session_id] = tm
+        last[session_id] = tm
+        ks = RE_KEYSPACE.search(line).groups(0)[0]
+        session_keyspace[session_id] = ks
+        if not ks in all_cfs:
+            all_cfs[ks] = []
+        order.append(session_id)
+        rangeres = RE_RANGE.search(line)
+        range_start = int(rangeres.groups(0)[0])
+        range_end = int(rangeres.groups(0)[1])
+        range_size[session_id] = calc_range_size(range_start, range_end)
+        return
+
+    if not start.get(session_id):
+        # This is a repair message that is coordinated from another machine; skip it
+        return
+
+    # Regardless of message, update last seen message for this session
+    last[session_id] = tm
+    ks = session_keyspace[session_id]
+
+    # End of repair session
+    if line.find('session completed') >= 0:
+        end[session_id] = tm
+        return
+
+    hosts = RE_HOSTS.findall(line)
+    cf = parse_cf(line, prefix='requesting merkle trees for')
+    if cf:
+        if not cf in all_cfs[ks]:
+            all_cfs[ks].append(cf)
+        key = "%s:%s" % (session_id, cf)
+        merkle_pending[key] = set(hosts)
+        merkle_start[key] = tm
+        return
+
+    cf = parse_cf(line, prefix='Received merkle tree for')
+    if cf:
+        key = "%s:%s" % (session_id, cf)
+        merkle_pending[key].remove(hosts[0])
+        merkle_last[key] = tm
+        if not len(merkle_pending[key]):
+            merkle_end[key] = tm
+        return
+
+    cf = parse_cf(line, prefix='out of sync for')
+    if cf:
+        key = "%s:%s" % (session_id, cf)
+        if not key in streaming_start:
+            streaming_start[key] = tm
+            streams_pending[key] = set()
+            streams_all[key] = set()
+        streams_pending[key].add(string.join(hosts, ' -> '))
+        streams_all[key].add(string.join(hosts, ' -> '))
+
+        return
+
+    cf = parse_cf(line, prefix='are consistent for')
+    if cf:
+        return
+
+    cf = parse_cf(line, suffix='is fully synced')
+    if cf:
+        key = "%s:%s" % (session_id, cf)
+        streaming_last[key] = tm
+        streaming_end[key] = tm
+        if key in streams_pending:
+            streams_pending[key].clear()
+        return
+
+    if line.find('Repair completed between') >= 0:
+        # This requires DEBUG logging to be enabled
+        cf = line.strip().split(' ')[-1]
+        key = "%s:%s" % (session_id, cf)
+        # This message is sent even if two nodes were fully synced
+        if key in streams_pending:
+            streams_pending[key].discard(string.join(hosts, ' -> '))
+            hosts.reverse()
+            streams_pending[key].discard(string.join(hosts, ' -> '))
+        streaming_last[key] = tm
+        return
+
+    if line.find("DEBUG"):
+        return
+
+    # TODO: Parse error messages from repair
+
+    print "UNKNOWN LOG LINE: ", line
+
+
+def output_summary(session_id):
+    now = time.mktime(time.gmtime())
+
+    print "-----------------------------------------------"
+    st = start.get(session_id)
+    et = end.get(session_id)
+    ks = session_keyspace[session_id]
+
+    progress = ""
+    if not et:
+        progress = "   IN PROGRESS"
+    print "Session %s   [%s] (%0.2f%% of the ring)%s" % (session_id, ks, range_size[session_id], progress)
+
+    if et:
+        dif = time.mktime(et)-time.mktime(st)
+        print "  Started %s, ended %s (%d seconds)" % (time.strftime(FORMAT, st), time.strftime(FORMAT, et), dif)
+        finished = True
+    else:
+        et = last.get(session_id)
+        print "  Started %s (%d seconds ago)" % (time.strftime(FORMAT, st), now-time.mktime(st))
+        print "  Last update was %d seconds ago" % (now-time.mktime(et))
+        finished = False
+
+    print
+
+    for cf in all_cfs[ks]:
+        print "  %s" % cf
+
+        key = "%s:%s" % (session_id, cf)
+        st = merkle_start.get(key)
+        et = merkle_end.get(key)
+        if not st:
+            # Haven't started them merkle phase yet
+            print "      Merkle phase:     Not started"
+        elif len(merkle_pending[key]):
+            if finished:
+                # Unfinished merkle trees but repair session done probably means it was aborted
+                print "      Merkle phase:     Started %s  ABORTED" % time.strftime(FORMAT, st)
+            else:
+                # Haven't received all merkle trees yet
+                print "      Merkle phase:     Started %s  IN PROGRESS  (%d seconds)" % (time.strftime(FORMAT, st), now-time.mktime(st))
+                print "          %d merkle trees remain, for instance from %s" % (len(merkle_pending[key]), list(merkle_pending[key])[0])
+                et = merkle_last.get(key)
+                if et:
+                    print "          Last merkle tree was received %d seconds ago" % (now-time.mktime(et))
+                else:
+                    print "          No merkle trees received yet"
+        else:
+            # All merkle trees received
+            dif = time.mktime(et)-time.mktime(st)
+            print "      Merkle phase:     Started %s, ended %s (%d seconds)" % (time.strftime(FORMAT, st), time.strftime(FORMAT, et), dif)
+
+            st = streaming_start.get(key)
+            et = streaming_end.get(key)
+            if not st and not et:
+                # Streaming not started
+                print "      Streaming phase:  Not started"
+            elif st and et:
+                # Streaming finished
+                dif = time.mktime(et)-time.mktime(st)
+                print "      Streaming phase:  Started %s, ended %s (%d seconds)" % (time.strftime(FORMAT, st), time.strftime(FORMAT, et), dif)
+            elif not st and et:
+                # No need to stream
+                print "      Streaming phase:  No streams required"
+            elif st and not et:
+                # Streaming in progress
+                if finished:
+                    # Unfinished streams but repair session done probably means it was aborted
+                    print "      Streaming phase:  Started %s  ABORTED" % time.strftime(FORMAT, st)
+                else:
+                    print "      Streaming phase:  Started %s  IN PROGRESS  (%d seconds)" % (time.strftime(FORMAT, st), now-time.mktime(st))
+                    hosts = list(streams_pending[key])[0]
+                    print "          %d/%d streaming tasks remain, for instance %s" % (len(streams_pending[key]), len(streams_all[key]), hosts)
+                    et = streaming_last.get(key)
+                    if et:
+                        print "          Last streaming task finished %d seconds ago" % (now-time.mktime(et))
+
+def parse_file(f):
+    for line in f:
+        parse_line(line)
+
+def main():
+    parser = OptionParser()
+    parser.add_option('--stdin', action='store_true', default=False,
+        help='Read log file from stdin instead of /var/log/cassandra/system.log')
+    parser.add_option('--last', action='store_true', default=False,
+        help='Only display the most recent repair session')
+    parser.add_option('--active', action='store_true', default=False,
+        help='Only display active repair sessions')
+
+    (opts, args) = parser.parse_args()
+
+    if opts.stdin:
+        parse_file(sys.stdin)
+    else:
+        # Check the .1 file as well in case the files were recently rolled
+        if os.path.isfile('%s.1' % CASSANDRA_LOG_FILE):
+            parse_file(open('%s.1' % CASSANDRA_LOG_FILE, 'r'))
+        parse_file(open(CASSANDRA_LOG_FILE, 'r'))
+
+    sessions = order
+    if opts.active:
+        sessions = [x for x in sessions if x not in end]
+
+    if opts.last and len(sessions) > 0:
+        sessions = [sessions[-1]]
+
+    for session_id in sessions:
+        output_summary(session_id)
+
+if __name__ == '__main__':
+    main()
