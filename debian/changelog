@@ -1,0 +1,5 @@
+spotify-cassandra-opstools (0.1) unstable; urgency=low
+
+  * Initial release
+
+ -- Jimmy Mårdell <yarin@spotify.com>  Mon, 24 Nov 2014 10:54:29 +0200
