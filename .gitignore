@@ -1,2 +1,4 @@
+.idea/
 .m2-repository
 target/
+*.iml
