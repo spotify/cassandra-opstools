@@ -2,10 +2,10 @@ Source: spotify-cassandra-opstools
 Section: non-free/net
 Priority: extra
 Maintainer: Jimmy Mardell <yarin@spotify.com>
-Build-Depends: debhelper (>= 5)
+Build-Depends: debhelper (>= 5), default-jdk, maven2
 Standards-Version: 3.8.3
 
 Package: spotify-cassandra-opstools
 Architecture: all
-Depends: python
+Depends: python, python-pycassa, python-kazoo, python-murmurhash3, python-cassandra-driver, default-jre
 Description: Operational support tools for Cassandra
