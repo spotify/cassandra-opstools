@@ -17,4 +17,4 @@ CLASSPATH="/usr/share/cassandra-opstools/*"
 
 java -cp "$CLASSPATH" \
   -Xmx128m
-  com.spotify.cassandra.opstools.TruncateHints
+  com.spotify.cassandra.opstools.TruncateHints "$@"
