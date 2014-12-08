@@ -21,7 +21,7 @@ import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.OnDiskAtom;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.dht.RandomPartitioner;
+import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -57,6 +57,7 @@ public class CountTombstones {
 
     final Options options = new Options();
     options.addOption("l", "legend", false, "Include column name explanation");
+    options.addOption("p", "partitioner", true, "The partitioner used by database");
 
     CommandLineParser parser = new BasicParser();
     CommandLine cmd = parser.parse(options, args);
@@ -70,7 +71,15 @@ public class CountTombstones {
 
     // Fake DatabaseDescriptor settings so we don't have to load cassandra.yaml etc
     Config.setClientMode(true);
-    DatabaseDescriptor.setPartitioner(new RandomPartitioner());
+    String partitionerName = String.format("org.apache.cassandra.dht.%s",
+                                           options.hasOption("p") ? options.getOption("p") : "RandomPartitioner");
+    try {
+      Class<?> clazz = Class.forName(partitionerName);
+      IPartitioner partitioner = (IPartitioner) clazz.newInstance();
+      DatabaseDescriptor.setPartitioner(partitioner);
+    } catch (Exception e) {
+      throw new RuntimeException("Can't instantiate partitioner " + partitionerName);
+    }
 
     PrintStream out = System.out;
 
