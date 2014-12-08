@@ -16,5 +16,5 @@
 CLASSPATH="/usr/share/cassandra-opstools/*"
 
 java -cp "$CLASSPATH" \
-  -Xmx128m
+  -Xmx128m \
   com.spotify.cassandra.opstools.AbortRepairs "$@"
