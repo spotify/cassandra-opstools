@@ -66,6 +66,10 @@ def generate_repair(options):
             cmd += " %s" % " ".join(options.columnfamily)
         if options.snapshot:
             cmd += " -snapshot"
+        if options.parallel:
+            cmd += " -par"
+        if options.dcparallel:
+            cmd += " -dcpar"
         if options.local:
             cmd += " -local"
         while cur < stop:
@@ -108,7 +112,15 @@ def main():
 
     parser.add_option("-s", "--snapshot", dest="snapshot", default="",
                       action="store_const", const="-snapshot",
-                      metavar="SNAPSHOT", help="Use snapshot repair")
+                      metavar="SNAPSHOT", help="Use snapshot repair (default in 2.0)")
+
+    parser.add_option("--par", dest="parallel", default="",
+                      action="store_const", const="-par",
+                     metavar="PARALLEL", help="Use parallel repair (default in 1.2)")
+
+    parser.add_option("--dcpar", dest="dcparallel", default="",
+                      action="store_const", const="-dcpar",
+                      metavar="DCPARALLEL", help="Use dc parallel repair (available in 2.0.12)")
 
     (options, args) = parser.parse_args()
 
