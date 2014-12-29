@@ -26,6 +26,7 @@ def generate_repair(options):
     session=cluster.connect()
 
     ring = cluster.metadata.token_map.ring
+    all_hosts = cluster.metadata.all_hosts()
 
     MIN_SEGMENT_SIZE = 100
 
@@ -43,6 +44,9 @@ def generate_repair(options):
 
     RANGE_SIZE = RANGE_MAX - RANGE_MIN + 1
 
+    if options.local:
+        local_dc = next(host for host in all_hosts if host.address==options.host).datacenter
+
     # We split each token range into options.ranges segments.
     # Also ensure that no segment is less than MIN_SEGMENT_SIZE
     # Slightly messy since we need to support that the first
@@ -52,7 +56,12 @@ def generate_repair(options):
     for i in range(0,len(ring)):
         start = ring[i]
         stop  = ring[(i+1) % len(ring)]
-        host  = cluster.metadata.token_map.token_to_host_owner[stop]
+        if options.local:
+            # Special treatment needed when running local repair
+            hosts = cluster.metadata.token_map.get_replicas(options.keyspace, start)
+            host = next(host for host in hosts if host.datacenter==local_dc)
+        else:
+            host  = cluster.metadata.token_map.token_to_host_owner[stop]
         start = start.value
         stop  = stop.value
         if stop < start:
@@ -73,17 +82,17 @@ def generate_repair(options):
         if options.local:
             cmd += " -local"
         while cur < stop:
-            next = min(stop, cur + range_length)
+            nxt = min(stop, cur + range_length)
             ocur = cur
-            onext = next
-            if onext > RANGE_MAX:
-                onext -= RANGE_SIZE
+            onxt = nxt
+            if onxt > RANGE_MAX:
+                onxt -= RANGE_SIZE
             if ocur > RANGE_MAX:
                 ocur -= RANGE_SIZE
-            # Repair between tokens 'ocur' and 'onext' using 'host' as coordinator
-            print "%s -st %s -et %s -h %s" % (cmd, token_format.format(ocur), token_format.format(onext), host)
-            total += next - cur
-            cur = next
+            # Repair between tokens 'ocur' and 'onxt' using 'host' as coordinator
+            print "%s -st %s -et %s -h %s" % (cmd, token_format.format(ocur), token_format.format(onxt), host)
+            total += nxt - cur
+            cur = nxt
 
     if total != RANGE_SIZE:
         # Sanity check that we've generated repairs for the entire range
