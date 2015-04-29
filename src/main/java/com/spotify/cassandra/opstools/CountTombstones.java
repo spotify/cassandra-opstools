@@ -72,7 +72,7 @@ public class CountTombstones {
     // Fake DatabaseDescriptor settings so we don't have to load cassandra.yaml etc
     Config.setClientMode(true);
     String partitionerName = String.format("org.apache.cassandra.dht.%s",
-                                           options.hasOption("p") ? options.getOption("p") : "RandomPartitioner");
+                                           cmd.hasOption("p") ? cmd.getOptionValue("p") : "RandomPartitioner");
     try {
       Class<?> clazz = Class.forName(partitionerName);
       IPartitioner partitioner = (IPartitioner) clazz.newInstance();
