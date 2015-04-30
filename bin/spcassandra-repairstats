@@ -38,6 +38,7 @@ RE_KEYSPACE = re.compile(" for ([^\.]*)")
 
 start={}  # session-id -> start time of session
 end={}    # session-id -> end time of session
+failed={} # session-id -> session failed message
 last={}   # session-id -> last time of a log message
 session_keyspace={} # session-id -> keyspace
 range_size={} # session-id -> size of range in %
@@ -172,7 +173,12 @@ def parse_line(line):
         streaming_last[key] = tm
         return
 
-    if line.find("DEBUG"):
+    if line.find('session failed') >= 0:
+        failed[session_id] = line[line.find(session_id) + len(session_id) + 2:]
+        end[session_id] = tm
+        return
+
+    if line.find("DEBUG") >= 0:
         return
 
     # TODO: Parse error messages from repair
@@ -187,6 +193,7 @@ def output_summary(session_id):
     st = start.get(session_id)
     et = end.get(session_id)
     ks = session_keyspace[session_id]
+    failed_msg = failed.get(session_id)
 
     progress = ""
     if not et:
@@ -204,6 +211,9 @@ def output_summary(session_id):
         finished = False
 
     print
+    if failed_msg:
+        print "  ERROR: %s" % failed_msg
+        print
 
     for cf in all_cfs[ks]:
         print "  %s" % cf
