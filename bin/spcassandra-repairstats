@@ -178,6 +178,17 @@ def parse_line(line):
         end[session_id] = tm
         return
 
+    if line.find("Forwarding streaming repair") >= 0:
+        # Forwarding streaming repair of 4 ranges to /a.b.c.d (to be streamed with /e.f.g.h)
+
+        # This message doesn't add any new value to what we already know, so just ignore it
+        return
+    if line.find("streaming task succeed") >= 0:
+        # streaming task succeed, returning response to /a.b.c.d
+
+        # This message doesn't add any new value to what we already know, so just ignore it
+        return
+
     if line.find("DEBUG") >= 0:
         return
 
